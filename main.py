@@ -25,7 +25,13 @@ def make_deps(settings: Settings, *, rag_tool: Tool | None = None, web_fail: boo
         settings.docs_dir, OpenAIEmbeddings(model=settings.embedding_model), k=settings.rag_top_k
     )
     return AgentDeps(
-        reasoner=ClaudeReasoner(settings.llm_model, timeout_s=settings.llm_timeout_s),
+        reasoner=ClaudeReasoner(
+            settings.llm_model,
+            step_effort=settings.llm_step_effort,
+            answer_effort=settings.llm_answer_effort,
+            max_tokens=settings.llm_max_tokens,
+            timeout_s=settings.llm_timeout_s,
+        ),
         rag_tool=rag_tool or retriever,
         web_tool=MockWebSearch(fail=web_fail),
         settings=settings,

@@ -5,7 +5,7 @@ description = "Agentic RAG orchestration with LangGraph: planning, corrective re
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "langchain-anthropic>=1.7.5",
+    "anthropic>=1.11.0",
     "langchain-core>=1.6.7",
     "langchain-openai>=1.6.7",
     "langgraph>=1.2.14",

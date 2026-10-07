@@ -17,6 +17,8 @@ AfterGrade = Literal["rewrite_query", "web_search", "synthesize"]
 
 
 def route_after_analyze(state: AgentState) -> AfterAnalyze:
+    if state.get("refused"):
+        return "synthesize"
     route = state["plan"].route
     if route == "rag":
         return "rag_search"

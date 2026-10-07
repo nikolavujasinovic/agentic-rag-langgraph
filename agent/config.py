@@ -44,6 +44,9 @@ class Settings:
 
     # --- Models & retrieval ------------------------------------------------
     llm_model: str = "claude-sonnet-5-5"
+    llm_step_effort: str = "low"       # plan / grade / rewrite / chat: routing decisions
+    llm_answer_effort: str = "medium"  # final grounded answer
+    llm_max_tokens: int = 16000
     llm_timeout_s: float = 60.0
     embedding_model: str = "text-embedding-3-small"
     rag_top_k: int = 4

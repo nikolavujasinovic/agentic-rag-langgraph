@@ -7,6 +7,7 @@ from typing import Callable, Sequence
 
 from langchain_core.messages import AnyMessage
 
+from agent.llm import AnswerResult
 from agent.state import Document, Grade, Plan
 from agent.tools import Hit
 
@@ -19,7 +20,10 @@ class FakeReasoner:
     grade_fn: Callable[[Sequence[Document]], Grade] = lambda docs: Grade(
         sufficient=True, needs_external=False, reason="ok"
     )
-    answer_fn: Callable[[Sequence[Document]], str] = lambda docs: " ".join(f"[{d.id}]" for d in docs)
+    # Default: cite every document, like a model whose answer draws on all results.
+    answer_fn: Callable[[Sequence[Document]], AnswerResult] = lambda docs: AnswerResult(
+        text="answer " + " ".join(f"[{d.id}]" for d in docs), cited_ids=[d.id for d in docs]
+    )
     plan_calls: list[tuple[str, list[AnyMessage]]] = field(default_factory=list)
 
     def plan(self, query: str, history: Sequence[AnyMessage]) -> Plan:
@@ -34,7 +38,7 @@ class FakeReasoner:
     def rewrite(self, query: str, documents: Sequence[Document]) -> str:
         return f"{query} (rephrased)"
 
-    def answer(self, query: str, documents: Sequence[Document], history: Sequence[AnyMessage]) -> str:
+    def answer(self, query: str, documents: Sequence[Document], history: Sequence[AnyMessage]) -> AnswerResult:
         return self.answer_fn(documents)
 
     def chat(self, query: str, history: Sequence[AnyMessage]) -> str:

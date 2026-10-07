@@ -65,6 +65,7 @@ class AgentState(TypedDict, total=False):
     last_tool: Literal["rag", "web"] | None
     web_tried: bool
     rag_unavailable: bool
+    refused: bool                              # the model declined the request (policy refusal)
     errors: list[str]
     citations: list[Document]
     final_answer: str

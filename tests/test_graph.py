@@ -1,6 +1,7 @@
 """End-to-end graph tests with fake LLM and tools (no network)."""
 
 from agent import AgentDeps, Settings, build_graph, run_turn
+from agent.llm import REFUSAL_ANSWER, AnswerResult, LLMRefusalError
 from agent.state import Grade, Plan
 from tests.fakes import FakeReasoner, FakeTool
 
@@ -16,15 +17,34 @@ def make(reasoner=None, rag=None, web=None, settings=FAST):
 
 
 def test_happy_path_answers_from_internal_docs_with_citations():
-    reasoner = FakeReasoner(answer_fn=lambda docs: "Refunds within 30 days [doc-1]. Also [doc-99].")
+    reasoner = FakeReasoner(
+        answer_fn=lambda docs: AnswerResult(text="Refunds within 30 days [doc-1].", cited_ids=["doc-1"])
+    )
     graph, _, rag, web = make(reasoner)
 
     result = run_turn(graph, "t1", "refund policy?")
 
     assert result.path == ["analyze_query", "rag_search", "grade_context", "synthesize"]
     assert result.tool_calls == 1 and web.calls == []
-    assert "[doc-99]" not in result.answer  # hallucinated citation stripped
     assert [d.id for d in result.citations] == ["doc-1"]
+    assert result.citations[0].location == "rag/1"
+
+
+def test_refused_plan_short_circuits_without_tools():
+    graph, _, rag, web = make(FakeReasoner(plan_result=LLMRefusalError("general_harms")))
+    result = run_turn(graph, "t1", "something disallowed")
+    assert result.path == ["analyze_query", "synthesize"]
+    assert result.answer == REFUSAL_ANSWER and rag.calls == [] and web.calls == []
+    assert any("refusal" in e for e in result.errors)
+
+
+def test_refused_answer_returns_refusal_message():
+    def refuse(docs):
+        raise LLMRefusalError("cyber")
+
+    graph, *_ = make(FakeReasoner(answer_fn=refuse))
+    result = run_turn(graph, "t1", "question")
+    assert result.answer == REFUSAL_ANSWER and result.citations == []
 
 
 def test_corrective_loop_rewrites_then_falls_back_to_web():

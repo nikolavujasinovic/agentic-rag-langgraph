@@ -8,20 +8,25 @@ moving toward an answer.
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
 from typing import Literal, Sequence
 
 from langchain_core.messages import AIMessage, AnyMessage
 
 from agent.config import Settings
-from agent.llm import Reasoner, fallback_answer, fallback_grade, fallback_plan
+from agent.llm import (
+    REFUSAL_ANSWER,
+    LLMRefusalError,
+    Reasoner,
+    classify_error,
+    fallback_answer,
+    fallback_grade,
+    fallback_plan,
+)
 from agent.state import AgentState, Document
 from agent.tools import CircuitBreaker, Hit, Tool, call_tool
 
 log = logging.getLogger(__name__)
-
-_CITATION = re.compile(r"\[((?:doc|web)-\d+)\]")
 
 
 @dataclass
@@ -57,11 +62,14 @@ class AgentNodes:
         query = messages[-1].text
         history = self._history(messages[:-1])
         errors: list[str] = []
+        refused = False
         try:
             plan = self.deps.reasoner.plan(query, history)
+        except LLMRefusalError as exc:
+            errors.append(_llm_failure("planner", exc))
+            plan, refused = fallback_plan(query), True
         except Exception as exc:
-            log.warning("planner failed, using heuristic plan: %s", exc)
-            errors.append(f"planner: {type(exc).__name__}: {exc}")
+            errors.append(_llm_failure("planner", exc, "using heuristic plan"))
             plan = fallback_plan(query)
         if not plan.standalone_query.strip():
             plan = plan.model_copy(update={"standalone_query": query})
@@ -77,6 +85,7 @@ class AgentNodes:
             "last_tool": None,
             "web_tried": False,
             "rag_unavailable": False,
+            "refused": refused,
             "errors": errors,
             "citations": [],
             "final_answer": "",
@@ -125,10 +134,9 @@ class AgentNodes:
         try:
             grade = self.deps.reasoner.grade(state["query"], documents)
         except Exception as exc:
-            log.warning("grader failed, failing open: %s", exc)
             return {
                 "grade": fallback_grade(documents),
-                "errors": [*state.get("errors", []), f"grader: {type(exc).__name__}: {exc}"],
+                "errors": [*state.get("errors", []), _llm_failure("grader", exc, "failing open")],
             }
         return {"grade": grade}
 
@@ -140,8 +148,7 @@ class AgentNodes:
             if new_query:
                 update["search_query"] = new_query
         except Exception as exc:
-            log.warning("rewrite failed, keeping query: %s", exc)
-            update["errors"] = [*state.get("errors", []), f"rewrite: {type(exc).__name__}: {exc}"]
+            update["errors"] = [*state.get("errors", []), _llm_failure("rewrite", exc, "keeping query")]
         return update
 
     # ------------------------------------------------------------------ #
@@ -150,25 +157,38 @@ class AgentNodes:
         history = self._history(state["messages"][:-1])
         errors = list(state.get("errors", []))
 
-        if not documents and state["plan"].route == "direct":
+        citations: list[Document] = []
+
+        if state.get("refused"):
+            answer = REFUSAL_ANSWER
+        elif not documents and state["plan"].route == "direct":
             try:
                 answer = self.deps.reasoner.chat(query, history)
+            except LLMRefusalError as exc:
+                errors.append(_llm_failure("chat", exc))
+                answer = REFUSAL_ANSWER
             except Exception as exc:
-                errors.append(f"chat: {type(exc).__name__}: {exc}")
+                errors.append(_llm_failure("chat", exc))
                 answer = "Sorry, I can't respond right now. Please try again shortly."
-            citations: list[Document] = []
         elif not documents:
             answer = _no_context_answer(state)
-            citations = []
         else:
             try:
-                raw = self.deps.reasoner.answer(query, documents, history)
+                result = self.deps.reasoner.answer(query, documents, history)
+            except LLMRefusalError as exc:
+                errors.append(_llm_failure("answer", exc))
+                result = None
             except Exception as exc:
-                log.warning("answer generation failed: %s", exc)
-                errors.append(f"answer: {type(exc).__name__}: {exc}")
-                raw = fallback_answer(documents)
-            answer, citations = _validate_citations(raw, documents)
-            if state.get("rag_unavailable") and all(d.source == "web" for d in documents):
+                errors.append(_llm_failure("answer", exc, "returning source list"))
+                result = fallback_answer(documents)
+            if result is None:
+                answer = REFUSAL_ANSWER
+            else:
+                # Citations come from the API (search_result_location), so every id is valid by construction.
+                by_id = {d.id: d for d in documents}
+                answer = result.text
+                citations = [by_id[i] for i in result.cited_ids if i in by_id]
+            if result is not None and state.get("rag_unavailable") and all(d.source == "web" for d in documents):
                 answer += (
                     "\n\nNote: internal documentation was unavailable for this request, "
                     "so this answer relies on external sources only."
@@ -206,21 +226,15 @@ def _merge_documents(existing: list[Document], hits: list[Hit], kind: Literal["r
     return merged
 
 
-def _validate_citations(answer: str, documents: list[Document]) -> tuple[str, list[Document]]:
-    """Strip citation ids the model invented; return the documents actually cited."""
-    by_id = {d.id: d for d in documents}
-    cited: dict[str, Document] = {}
-
-    def keep_or_drop(match: re.Match) -> str:
-        doc_id = match.group(1)
-        if doc_id in by_id:
-            cited.setdefault(doc_id, by_id[doc_id])
-            return match.group(0)
-        log.warning("dropping hallucinated citation %s", doc_id)
-        return ""
-
-    cleaned = _CITATION.sub(keep_or_drop, answer)
-    return re.sub(r"[ \t]+([.,;:])", r"\1", cleaned), list(cited.values())
+def _llm_failure(step: str, exc: BaseException, action: str = "") -> str:
+    """Log an LLM failure at a severity matching its kind and return the error record."""
+    kind, transient = classify_error(exc)
+    suffix = f"; {action}" if action else ""
+    if kind == "refusal" or transient:
+        log.warning("%s %s%s: %s", step, kind, suffix, exc)
+    else:  # bad request / auth / unexpected: a bug or misconfiguration, keep the traceback
+        log.error("%s %s%s: %s", step, kind, suffix, exc, exc_info=exc)
+    return f"{step}: {kind}: {exc}"
 
 
 def _no_context_answer(state: AgentState) -> str:
